@@ -9,7 +9,7 @@ namespace Content.Shared._CMU14.Medical.Surgery;
 ///     Tool categories are resolved at click time. Allowed values include:
 ///     <c>scalpel</c>, <c>hemostat</c>, <c>retractor</c>, <c>cautery</c>,
 ///     <c>bone_saw</c>, <c>bone_setter</c>, <c>bone_gel</c>,
-///     <c>bone_graft</c>, <c>organ_clamp</c>, <c>burn_debridement</c>.
+    ///     <c>bone_graft</c>, <c>organ_clamp</c>, <c>scalpel_or_burn_kit</c>.
 /// </summary>
 [Prototype("cmuSurgeryStepMetadata")]
 public sealed partial class CMUSurgeryStepMetadataPrototype : IPrototype
@@ -36,6 +36,13 @@ public sealed partial class CMUSurgeryStepMetadataPrototype : IPrototype
 
     [DataField]
     public string Category = "general";
+
+    /// <summary>
+    ///     Minimum RMCSkillSurgery level required to surface and arm this
+    ///     surgery from the CMU surgery window.
+    /// </summary>
+    [DataField]
+    public int MinSkill = 1;
 
     /// <summary>
     ///     Whether this surgery can be performed by the patient on themselves.

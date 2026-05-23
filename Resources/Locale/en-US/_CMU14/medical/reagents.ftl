@@ -1,5 +1,5 @@
 cmu-medical-heal-organ-guidebook            = Heals { $amount } HP per cycle on the patient's { $organ }.
-cmu-medical-pain-suppression-guidebook       = Suppresses { $percent }% of incoming pain for { $seconds } seconds per unit. Strongest concurrent painkiller wins.
+cmu-medical-pain-suppression-guidebook       = Suppresses { $percent }% of pain accumulation, masks { $tiers } pain tier(s), and adds { $decay } pain/sec decay for { $seconds } seconds per unit. Strongest active painkiller profile wins.
 cmu-medical-bone-regen-boost-guidebook       = Multiplies bone healing rate by { $multiplier } while active.
 cmu-medical-restart-heart-guidebook          = { $chance }% chance per cycle to restart a stopped heart (only on hearts that are not yet at the Dead stage).
 
@@ -17,10 +17,12 @@ reagent-name-cmu-cardiocaine                 = Cardiocaine
 reagent-desc-cmu-cardiocaine                 = A cardiac-targeting compound; attempts to restart a stopped heart.
 reagent-name-cmu-osteocalc                   = Osteocalc
 reagent-desc-cmu-osteocalc                   = A calcium-rich slurry that accelerates bone integrity regeneration.
+reagent-name-cmu-biogenic-matrix             = Biogenic Matrix
+reagent-desc-cmu-biogenic-matrix             = A sterile protein-lattice slurry used by limb printers to grow graft-ready replacement limbs.
 
 reagent-name-cmu-paracetamol                 = Paracetamol
-reagent-desc-cmu-paracetamol                 = A mild pain reliever. Suppresses pain accumulation by 25%.
+reagent-desc-cmu-paracetamol                 = A mild pain reliever. Suppresses pain accumulation, masks one pain tier, and helps excess pain fade.
 reagent-name-cmu-tramadol                    = Tramadol
-reagent-desc-cmu-tramadol                    = A moderate opioid pain reliever. Suppresses pain accumulation by 50%.
+reagent-desc-cmu-tramadol                    = A moderate opioid pain reliever. Strongly masks pain and helps excess pain fade.
 reagent-name-cmu-oxycodone                   = Oxycodone
-reagent-desc-cmu-oxycodone                   = A heavy opioid for severe pain. Suppresses pain accumulation by 75%.
+reagent-desc-cmu-oxycodone                   = A heavy opioid for severe pain. Can fully mask pain shock while it lasts.

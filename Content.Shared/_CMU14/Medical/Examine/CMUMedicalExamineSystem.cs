@@ -5,20 +5,27 @@ using Content.Shared._CMU14.Medical.Bones;
 using Content.Shared._CMU14.Medical.Items;
 using Content.Shared._CMU14.Medical.Wounds;
 using Content.Shared._RMC14.Medical.Wounds;
+using Content.Shared.Body.Components;
 using Content.Shared.Body.Part;
 using Content.Shared.Body.Systems;
 using Content.Shared.Examine;
-using Content.Shared.IdentityManagement;
 using Robust.Shared.Configuration;
+using Robust.Shared.Containers;
 using Robust.Shared.Timing;
 
 namespace Content.Shared._CMU14.Medical.Examine;
 
-public sealed class CMUMedicalExamineSystem : EntitySystem
+public sealed partial class CMUMedicalExamineSystem : EntitySystem
 {
-    [Dependency] private readonly IConfigurationManager _cfg = default!;
-    [Dependency] private readonly IGameTiming _timing = default!;
-    [Dependency] private readonly SharedBodySystem _body = default!;
+    [Dependency] private IConfigurationManager _cfg = default!;
+    [Dependency] private IGameTiming _timing = default!;
+    [Dependency] private SharedBodySystem _body = default!;
+    [Dependency] private SharedContainerSystem _containers = default!;
+
+    private const string UntreatedWoundColor = "#ff4d4d";
+    private const string TreatedWoundColor = "#7bd88f";
+    private const string FractureColor = "#dca94c";
+    private const string SeveredColor = "#ff4d4d";
 
     public override void Initialize()
     {
@@ -32,76 +39,171 @@ public sealed class CMUMedicalExamineSystem : EntitySystem
         if (!_cfg.GetCVar(CMUMedicalCCVars.Enabled))
             return;
 
-        var target = Identity.Entity(ent, EntityManager, args.Examiner);
         using (args.PushGroup(nameof(CMUMedicalExamineSystem), -1))
         {
-            if (_cfg.GetCVar(CMUMedicalCCVars.WoundsEnabled))
-                AddWoundLines(ent, args, target);
-
-            if (_cfg.GetCVar(CMUMedicalCCVars.BoneEnabled))
-                AddFractureLines(ent, args, target);
+            AddBodyPartLines(
+                ent,
+                args,
+                _cfg.GetCVar(CMUMedicalCCVars.WoundsEnabled),
+                _cfg.GetCVar(CMUMedicalCCVars.BoneEnabled),
+                _cfg.GetCVar(CMUMedicalCCVars.BodyPartEnabled));
         }
     }
 
-    private void AddWoundLines(EntityUid body, ExaminedEvent args, EntityUid target)
+    private void AddBodyPartLines(
+        EntityUid body,
+        ExaminedEvent args,
+        bool includeWounds,
+        bool includeFractures,
+        bool includeMissingParts)
     {
         var now = _timing.CurTime;
-        var partSummaries = new List<string>();
+        var partSummaries = new List<BodyPartExamineSummary>();
 
         foreach (var (partUid, part) in _body.GetBodyChildren(body))
         {
-            var descriptions = new List<string>();
-            if (TryComp<BodyPartWoundComponent>(partUid, out var wounds))
+            var sections = new List<string>();
+
+            if (includeWounds)
             {
-                for (var i = 0; i < wounds.Wounds.Count; i++)
+                var untreated = new List<string>();
+                var treated = new List<string>();
+                if (TryComp<BodyPartWoundComponent>(partUid, out var wounds))
                 {
-                    var wound = wounds.Wounds[i];
-                    var size = i < wounds.Sizes.Count ? wounds.Sizes[i] : WoundSize.Deep;
-                    descriptions.Add(DescribeWound(wound, size, now));
+                    for (var i = 0; i < wounds.Wounds.Count; i++)
+                    {
+                        var wound = wounds.Wounds[i];
+                        var size = i < wounds.Sizes.Count ? wounds.Sizes[i] : WoundSize.Deep;
+                        if (wound.Treated)
+                            treated.Add(DescribeWound(wound, size, now));
+                        else
+                            untreated.Add(DescribeWound(wound, size, now));
+                    }
                 }
+
+                if (HasComp<CMUEscharComponent>(partUid))
+                    untreated.Add("charred burn tissue");
+
+                if (untreated.Count > 0)
+                    sections.Add($"[color={UntreatedWoundColor}]{ToSentence(untreated)}[/color]");
+
+                if (treated.Count > 0)
+                    sections.Add($"[color={TreatedWoundColor}]{ToSentence(treated)}[/color]");
             }
 
-            if (HasComp<CMUEscharComponent>(partUid))
-                descriptions.Add("charred burn tissue");
+            if (includeFractures
+                && TryComp<FractureComponent>(partUid, out var fracture)
+                && fracture.Severity != FractureSeverity.None)
+            {
+                var stabilized = HasComp<CMUSplintedComponent>(partUid) || HasComp<CMUCastComponent>(partUid);
+                sections.Add($"[color={FractureColor}]{DescribeFracture(fracture.Severity, stabilized)}[/color]");
+            }
 
-            if (descriptions.Count == 0)
+            if (sections.Count == 0)
                 continue;
 
-            partSummaries.Add($"{FormatPartName(part.PartType, part.Symmetry)}: {ToSentence(descriptions)}");
+            partSummaries.Add(new BodyPartExamineSummary(
+                BodyPartSortOrder(part.PartType, part.Symmetry),
+                FormatPartName(part.PartType, part.Symmetry),
+                ToSemicolonList(sections)));
         }
 
-        if (partSummaries.Count == 0)
-            return;
+        if (includeMissingParts)
+        {
+            foreach (var (type, symmetry) in GetMissingPartSlots(body))
+            {
+                partSummaries.Add(new BodyPartExamineSummary(
+                    BodyPartSortOrder(type, symmetry),
+                    FormatPartName(type, symmetry),
+                    $"[color={SeveredColor}]SEVERED[/color]"));
+            }
+        }
 
-        args.PushMarkup(Loc.GetString(
-            "cmu-medical-examine-wounds-line",
-            ("target", target),
-            ("parts", ToSemicolonList(partSummaries))));
+        partSummaries.Sort((a, b) => a.Order.CompareTo(b.Order));
+
+        foreach (var summary in partSummaries)
+        {
+            args.PushMarkup(Loc.GetString(
+                "cmu-medical-examine-body-part-line",
+                ("part", summary.Part),
+                ("conditions", summary.Conditions)));
+        }
     }
 
-    private void AddFractureLines(EntityUid body, ExaminedEvent args, EntityUid target)
+    private List<(BodyPartType Type, BodyPartSymmetry Symmetry)> GetMissingPartSlots(EntityUid body)
     {
-        var partSummaries = new List<string>();
+        var missing = new List<(BodyPartType Type, BodyPartSymmetry Symmetry)>();
+        if (!TryComp<BodyComponent>(body, out var bodyComp))
+            return missing;
 
-        foreach (var (partUid, part) in _body.GetBodyChildren(body))
+        if (_body.GetRootPartOrNull(body, bodyComp) is not { } root)
+            return missing;
+
+        AddMissingChildSlots(root.Entity, root.BodyPart, missing);
+
+        foreach (var (partUid, part) in _body.GetBodyChildren(body, bodyComp))
         {
-            if (!TryComp<FractureComponent>(partUid, out var fracture)
-                || fracture.Severity == FractureSeverity.None)
+            if (partUid == root.Entity)
+                continue;
+
+            AddMissingChildSlots(partUid, part, missing);
+        }
+
+        return missing;
+    }
+
+    private void AddMissingChildSlots(
+        EntityUid parent,
+        BodyPartComponent parentPart,
+        List<(BodyPartType Type, BodyPartSymmetry Symmetry)> missing)
+    {
+        foreach (var (slotId, slot) in parentPart.Children)
+        {
+            if (!IsReportableMissingPart(slot.Type))
+                continue;
+
+            var containerId = SharedBodySystem.GetPartSlotContainerId(slotId);
+            if (_containers.TryGetContainer(parent, containerId, out var container) &&
+                container.ContainedEntities.Count > 0)
             {
                 continue;
             }
 
-            var stabilized = HasComp<CMUSplintedComponent>(partUid) || HasComp<CMUCastComponent>(partUid);
-            partSummaries.Add($"{FormatPartName(part.PartType, part.Symmetry)}: {DescribeFracture(fracture.Severity, stabilized)}");
+            if (TryGetPartSymmetry(slotId, parentPart.Symmetry, out var symmetry))
+                missing.Add((slot.Type, symmetry));
+        }
+    }
+
+    private static bool IsReportableMissingPart(BodyPartType type)
+    {
+        return type is BodyPartType.Arm
+            or BodyPartType.Hand
+            or BodyPartType.Leg
+            or BodyPartType.Foot;
+    }
+
+    private static bool TryGetPartSymmetry(string slotId, BodyPartSymmetry parentSymmetry, out BodyPartSymmetry symmetry)
+    {
+        if (slotId.Contains("left", StringComparison.OrdinalIgnoreCase))
+        {
+            symmetry = BodyPartSymmetry.Left;
+            return true;
         }
 
-        if (partSummaries.Count == 0)
-            return;
+        if (slotId.Contains("right", StringComparison.OrdinalIgnoreCase))
+        {
+            symmetry = BodyPartSymmetry.Right;
+            return true;
+        }
 
-        args.PushMarkup(Loc.GetString(
-            "cmu-medical-examine-fractures-line",
-            ("target", target),
-            ("parts", ToSemicolonList(partSummaries))));
+        if (parentSymmetry is BodyPartSymmetry.Left or BodyPartSymmetry.Right)
+        {
+            symmetry = parentSymmetry;
+            return true;
+        }
+
+        symmetry = BodyPartSymmetry.None;
+        return false;
     }
 
     private static string DescribeWound(Wound wound, WoundSize size, TimeSpan now)
@@ -148,11 +250,47 @@ public sealed class CMUMedicalExamineSystem : EntitySystem
     private static string FormatPartName(BodyPartType type, BodyPartSymmetry symmetry)
     {
         var part = type.ToString().ToLowerInvariant();
+        if (symmetry == BodyPartSymmetry.Left)
+            return "Left " + part;
+
+        if (symmetry == BodyPartSymmetry.Right)
+            return "Right " + part;
+
+        if (type == BodyPartType.Head)
+            return "Head";
+
+        if (type == BodyPartType.Torso)
+            return "Torso";
+
+        return type.ToString();
+    }
+
+    private static int BodyPartSortOrder(BodyPartType type, BodyPartSymmetry symmetry)
+    {
+        return type switch
+        {
+            BodyPartType.Head => 0,
+            BodyPartType.Arm when symmetry == BodyPartSymmetry.Left => 10,
+            BodyPartType.Hand when symmetry == BodyPartSymmetry.Left => 11,
+            BodyPartType.Torso => 20,
+            BodyPartType.Arm when symmetry == BodyPartSymmetry.Right => 30,
+            BodyPartType.Hand when symmetry == BodyPartSymmetry.Right => 31,
+            BodyPartType.Leg when symmetry == BodyPartSymmetry.Left => 40,
+            BodyPartType.Foot when symmetry == BodyPartSymmetry.Left => 41,
+            BodyPartType.Leg when symmetry == BodyPartSymmetry.Right => 50,
+            BodyPartType.Foot when symmetry == BodyPartSymmetry.Right => 51,
+            _ => 100 + ((int) type * 10) + SymmetrySortOrder(symmetry),
+        };
+    }
+
+    private static int SymmetrySortOrder(BodyPartSymmetry symmetry)
+    {
         return symmetry switch
         {
-            BodyPartSymmetry.Left => $"left {part}",
-            BodyPartSymmetry.Right => $"right {part}",
-            _ => part,
+            BodyPartSymmetry.Left => 0,
+            BodyPartSymmetry.None => 1,
+            BodyPartSymmetry.Right => 2,
+            _ => 3,
         };
     }
 
@@ -163,7 +301,7 @@ public sealed class CMUMedicalExamineSystem : EntitySystem
             0 => string.Empty,
             1 => parts[0],
             2 => $"{parts[0]} and {parts[1]}",
-            _ => $"{string.Join(", ", parts.GetRange(0, parts.Count - 1))}, and {parts[^1]}",
+            _ => $"{string.Join(", ", parts.GetRange(0, parts.Count - 1))}, and {parts[parts.Count - 1]}",
         };
     }
 
@@ -171,4 +309,6 @@ public sealed class CMUMedicalExamineSystem : EntitySystem
     {
         return string.Join("; ", parts);
     }
+
+    private readonly record struct BodyPartExamineSummary(int Order, string Part, string Conditions);
 }

@@ -23,6 +23,7 @@ using Content.Shared.Mobs.Components;
 using Robust.Shared.Configuration;
 using Robust.Shared.Containers;
 using Robust.Shared.GameObjects;
+using Robust.Shared.Network;
 using Robust.Shared.Prototypes;
 using Robust.Shared.Timing;
 
@@ -33,15 +34,16 @@ namespace Content.Shared._CMU14.Medical.Wounds;
 ///     <see cref="SharedOrganHealthSystem"/> so integrity / fracture-severity
 ///     / organ-stage are already updated when the wound layer reads them.
 /// </summary>
-public abstract class SharedCMUWoundsSystem : EntitySystem
+public abstract partial class SharedCMUWoundsSystem : EntitySystem
 {
-    [Dependency] protected readonly IConfigurationManager Cfg = default!;
-    [Dependency] protected readonly IGameTiming Timing = default!;
-    [Dependency] protected readonly IPrototypeManager Proto = default!;
-    [Dependency] protected readonly SharedBodySystem Body = default!;
-    [Dependency] protected readonly DamageableSystem Damageable = default!;
-    [Dependency] protected readonly SharedContainerSystem Containers = default!;
-    [Dependency] protected readonly RMCUnrevivableSystem Unrevivable = default!;
+    [Dependency] protected IConfigurationManager Cfg = default!;
+    [Dependency] protected IGameTiming Timing = default!;
+    [Dependency] protected IPrototypeManager Proto = default!;
+    [Dependency] protected SharedBodySystem Body = default!;
+    [Dependency] protected DamageableSystem Damageable = default!;
+    [Dependency] protected SharedContainerSystem Containers = default!;
+    [Dependency] protected INetManager Net = default!;
+    [Dependency] protected RMCUnrevivableSystem Unrevivable = default!;
 
     private static readonly ProtoId<DamageGroupPrototype> BruteGroup = "Brute";
     private static readonly ProtoId<DamageGroupPrototype> BurnGroup = "Burn";
@@ -71,6 +73,10 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
     ///     unlocks the heal accumulator.
     /// </summary>
     public const float HealPerSecond = 0.6f;
+
+    private const float WoundScanInterval = 0.5f;
+
+    private float _woundScanAccumulator;
 
     private bool _medicalEnabled;
     private bool _woundsEnabled;
@@ -165,15 +171,17 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
 
     private void OnSplintStartup(Entity<CMUSplintedComponent> ent, ref ComponentStartup args)
     {
-        RaiseLocalEvent(new CMUSplintChangedEvent(ent.Owner, false));
+        var ev = new CMUSplintChangedEvent(ent.Owner, false);
+        RaiseLocalEvent(ref ev);
     }
 
     private void OnSplintRemove(Entity<CMUSplintedComponent> ent, ref ComponentRemove args)
     {
-        RaiseLocalEvent(new CMUSplintChangedEvent(ent.Owner, true));
+        var ev = new CMUSplintChangedEvent(ent.Owner, true);
+        RaiseLocalEvent(ref ev);
     }
 
-    private void OnSplintChanged(CMUSplintChangedEvent args)
+    private void OnSplintChanged(ref CMUSplintChangedEvent args)
     {
         if (!IsEnabled())
             return;
@@ -199,12 +207,59 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
         if (IsSynthOwned(part))
         {
             if (HasComp<InternalBleedingComponent>(part))
+            {
                 RemComp<InternalBleedingComponent>(part);
+                RaiseInternalBleedingChanged(part, true);
+            }
             return;
         }
 
-        var maxRate = 0f;
-        var source = string.Empty;
+        ComputeInternalBleedSource(part, ignoreSplint, out var maxRate, out var source);
+
+        if (maxRate <= 0f)
+        {
+            if (HasComp<InternalBleedingComponent>(part))
+            {
+                RemComp<InternalBleedingComponent>(part);
+                RaiseInternalBleedingChanged(part, true);
+            }
+            RemComp<CMUInternalBleedingSuppressedComponent>(part);
+            return;
+        }
+
+        // Surgical clamping suppresses the source it treated. A worse rate or
+        // a different source means the patient has developed a new active IB.
+        if (TryComp<CMUInternalBleedingSuppressedComponent>(part, out var suppressed))
+        {
+            if (IsSuppressedBleedSourceMatch(suppressed.Source, source)
+                && maxRate <= suppressed.BloodlossPerSecond + 0.001f)
+            {
+                if (HasComp<InternalBleedingComponent>(part))
+                {
+                    RemComp<InternalBleedingComponent>(part);
+                    RaiseInternalBleedingChanged(part, true);
+                }
+                return;
+            }
+
+            RemComp<CMUInternalBleedingSuppressedComponent>(part);
+        }
+
+        var changed = !TryComp<InternalBleedingComponent>(part, out var before)
+            || MathF.Abs(before.BloodlossPerSecond - maxRate) > 0.001f
+            || before.Source != source;
+        var ib = EnsureComp<InternalBleedingComponent>(part);
+        ib.BloodlossPerSecond = maxRate;
+        ib.Source = source;
+        Dirty(part, ib);
+        if (changed)
+            RaiseInternalBleedingChanged(part, false);
+    }
+
+    private void ComputeInternalBleedSource(EntityUid part, bool ignoreSplint, out float maxRate, out string source)
+    {
+        maxRate = 0f;
+        source = string.Empty;
 
         if (TryComp<FractureComponent>(part, out var f))
         {
@@ -243,20 +298,20 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
         if (TryComp<InternalBleedingComponent>(part, out var existing) && existing.Source == "blunt")
         {
             if (existing.BloodlossPerSecond > maxRate)
-                return;
+            {
+                maxRate = existing.BloodlossPerSecond;
+                source = existing.Source;
+            }
         }
+    }
 
-        if (maxRate <= 0f)
-        {
-            if (HasComp<InternalBleedingComponent>(part))
-                RemComp<InternalBleedingComponent>(part);
-            return;
-        }
+    private static bool IsSuppressedBleedSourceMatch(string suppressed, string current)
+    {
+        if (suppressed == current)
+            return true;
 
-        var ib = EnsureComp<InternalBleedingComponent>(part);
-        ib.BloodlossPerSecond = maxRate;
-        ib.Source = source;
-        Dirty(part, ib);
+        return suppressed.StartsWith("fracture:", StringComparison.Ordinal)
+            && current.StartsWith("fracture:", StringComparison.Ordinal);
     }
 
     private float GetSplintAdjustedFractureBleedRate(
@@ -278,19 +333,67 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
         if (IsSynthOwned(part))
             return;
 
+        RemComp<CMUInternalBleedingSuppressedComponent>(part);
+
         if (TryComp<InternalBleedingComponent>(part, out var existing) && existing.BloodlossPerSecond >= rate)
             return;
 
+        var changed = !TryComp<InternalBleedingComponent>(part, out var before)
+            || MathF.Abs(before.BloodlossPerSecond - rate) > 0.001f
+            || before.Source != source;
         var ib = EnsureComp<InternalBleedingComponent>(part);
         ib.BloodlossPerSecond = rate;
         ib.Source = source;
         Dirty(part, ib);
+        if (changed)
+            RaiseInternalBleedingChanged(part, false);
     }
 
     public void ClearInternalBleed(EntityUid part)
     {
+        ClearInternalBleed(part, false);
+    }
+
+    public void SuppressInternalBleed(EntityUid part)
+    {
+        ClearInternalBleed(part, true);
+    }
+
+    private void ClearInternalBleed(EntityUid part, bool suppressCurrentSource)
+    {
+        if (suppressCurrentSource && !IsSynthOwned(part))
+        {
+            if (TryComp<InternalBleedingComponent>(part, out var existing))
+            {
+                var suppressed = EnsureComp<CMUInternalBleedingSuppressedComponent>(part);
+                suppressed.Source = existing.Source;
+                suppressed.BloodlossPerSecond = existing.BloodlossPerSecond;
+            }
+            else
+            {
+                ComputeInternalBleedSource(part, false, out var rate, out var source);
+                if (rate > 0f)
+                {
+                    var suppressed = EnsureComp<CMUInternalBleedingSuppressedComponent>(part);
+                    suppressed.Source = source;
+                    suppressed.BloodlossPerSecond = rate;
+                }
+            }
+        }
+
         if (HasComp<InternalBleedingComponent>(part))
+        {
             RemComp<InternalBleedingComponent>(part);
+            RaiseInternalBleedingChanged(part, true);
+        }
+    }
+
+    private void RaiseInternalBleedingChanged(EntityUid part, bool removed)
+    {
+        if (TryGetBodyOwner(part) is not { } body)
+            return;
+        var ev = new InternalBleedingChangedEvent(body, part, removed);
+        RaiseLocalEvent(ref ev);
     }
 
     public void ClearAllWounds(Entity<BodyPartWoundComponent?> part)
@@ -303,6 +406,12 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
         part.Comp.Sizes.Clear();
         part.Comp.Bandages.Clear();
         Dirty(part.Owner, part.Comp);
+
+        if (TryGetBodyOwner(part.Owner) is { } body)
+        {
+            var ev = new WoundTreatedEvent(body, part.Owner);
+            RaiseLocalEvent(ref ev);
+        }
     }
 
     /// <summary>
@@ -311,12 +420,15 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
     public bool TryTreatWound(EntityUid part, BodyPartWoundComponent? comp = null)
         => TryTreatWound(part, out _, comp);
 
+    public bool TryTreatWound(EntityUid part, WoundType type, out bool completed, BodyPartWoundComponent? comp = null)
+        => TryTreatWound(part, out completed, comp, type);
+
     /// <summary>
     ///     Applies one bandage to the worst unclosed wound on the part.
     ///     Large wounds require multiple applications before they become
     ///     <c>Treated</c> and start closing.
     /// </summary>
-    public bool TryTreatWound(EntityUid part, out bool completed, BodyPartWoundComponent? comp = null)
+    public bool TryTreatWound(EntityUid part, out bool completed, BodyPartWoundComponent? comp = null, WoundType? type = null)
     {
         completed = false;
         if (!Resolve(part, ref comp, logMissing: false))
@@ -334,7 +446,7 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
         for (var i = 0; i < comp.Wounds.Count; i++)
         {
             var w = comp.Wounds[i];
-            if (w.Treated)
+            if (w.Treated || (type is { } woundType && w.Type != woundType))
                 continue;
             if (idx < 0 || w.Damage > worst)
             {
@@ -363,9 +475,87 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
         // Body resolution can fail on detached parts; the wound is still
         // treated but there's no pain owner to notify, so skip the raise.
         if (completed && TryGetBodyOwner(part) is { } body)
-            RaiseLocalEvent(new WoundTreatedEvent(body, part));
+        {
+            var ev = new WoundTreatedEvent(body, part);
+            RaiseLocalEvent(ref ev);
+        }
 
         return true;
+    }
+
+    public bool TryTreatWounds(
+        EntityUid part,
+        WoundType type,
+        int maxWounds,
+        out int treated,
+        BodyPartWoundComponent? comp = null)
+    {
+        treated = 0;
+        if (maxWounds <= 0)
+            return false;
+        if (!Resolve(part, ref comp, logMissing: false))
+            return false;
+
+        // Defence-in-depth gate: the picker UI pre-filters eschar parts, but
+        // direct API callers (admin verbs, tests) reach this path too.
+        if (HasComp<CMUEscharComponent>(part))
+            return false;
+
+        EnsureBandageSlots(comp);
+
+        var now = Timing.CurTime;
+        var changed = false;
+        while (treated < maxWounds && TryPickWorstUntreatedWound(comp, type, out var idx))
+        {
+            var size = GetWoundSize(comp, idx);
+            var required = WoundSizeProfile.BandagesRequired(size);
+            comp.Bandages[idx] = required;
+
+            var picked = comp.Wounds[idx];
+            comp.Wounds[idx] = picked with
+            {
+                Bloodloss = 0f,
+                StopBleedAt = now,
+                Treated = true,
+            };
+
+            treated++;
+            changed = true;
+        }
+
+        if (!changed)
+            return false;
+
+        Dirty(part, comp);
+
+        // Body resolution can fail on detached parts; the wounds are still
+        // treated but there's no pain owner to notify, so skip the raise.
+        if (TryGetBodyOwner(part) is { } body)
+        {
+            var ev = new WoundTreatedEvent(body, part);
+            RaiseLocalEvent(ref ev);
+        }
+
+        return true;
+    }
+
+    private static bool TryPickWorstUntreatedWound(BodyPartWoundComponent comp, WoundType type, out int idx)
+    {
+        idx = -1;
+        var worst = FixedPoint2.Zero;
+        for (var i = 0; i < comp.Wounds.Count; i++)
+        {
+            var wound = comp.Wounds[i];
+            if (wound.Treated || wound.Type != type)
+                continue;
+            if (idx < 0 || wound.Damage > worst)
+            {
+                idx = i;
+                worst = wound.Damage;
+            }
+        }
+
+        return idx >= 0;
     }
 
     /// <summary>
@@ -405,15 +595,23 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
     {
         base.Update(frameTime);
 
+        if (Net.IsClient)
+            return;
+
         if (!IsEnabled())
             return;
 
+        _woundScanAccumulator += frameTime;
+        if (_woundScanAccumulator < WoundScanInterval)
+            return;
+        _woundScanAccumulator = 0f;
+
         var now = Timing.CurTime;
-        TickWoundHealing(frameTime, now);
+        TickWoundHealing(now);
         TickInternalBleed(now);
     }
 
-    private void TickWoundHealing(float frameTime, TimeSpan now)
+    private void TickWoundHealing(TimeSpan now)
     {
         var query = EntityQueryEnumerator<BodyPartWoundComponent, BodyPartComponent>();
         while (query.MoveNext(out var partUid, out var pw, out var part))
@@ -480,7 +678,6 @@ public abstract class SharedCMUWoundsSystem : EntitySystem
             if (ib.NextBleedTick > now)
                 continue;
             ib.NextBleedTick = now + TimeSpan.FromSeconds(tickSeconds);
-            Dirty(partUid, ib);
 
             // Tourniquet stops bloodflow distal to it, so the bleed tick
             // no-ops while it's on. The necrosis countdown lives in

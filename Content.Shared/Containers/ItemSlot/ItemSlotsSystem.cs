@@ -26,14 +26,14 @@ namespace Content.Shared.Containers.ItemSlots
     /// </remarks>
     public sealed partial class ItemSlotsSystem : EntitySystem
     {
-        [Dependency] private readonly ISharedAdminLogManager _adminLogger = default!;
-        [Dependency] private readonly ActionBlockerSystem _actionBlockerSystem = default!;
-        [Dependency] private readonly SharedContainerSystem _containers = default!;
-        [Dependency] private readonly SharedPopupSystem _popupSystem = default!;
-        [Dependency] private readonly SharedHandsSystem _handsSystem = default!;
-        [Dependency] private readonly SharedAudioSystem _audioSystem = default!;
-        [Dependency] private readonly SharedTransformSystem _transform = default!;
-        [Dependency] private readonly EntityWhitelistSystem _whitelistSystem = default!;
+        [Dependency] private ISharedAdminLogManager _adminLogger = default!;
+        [Dependency] private ActionBlockerSystem _actionBlockerSystem = default!;
+        [Dependency] private SharedContainerSystem _containers = default!;
+        [Dependency] private SharedPopupSystem _popupSystem = default!;
+        [Dependency] private SharedHandsSystem _handsSystem = default!;
+        [Dependency] private SharedAudioSystem _audioSystem = default!;
+        [Dependency] private SharedTransformSystem _transform = default!;
+        [Dependency] private EntityWhitelistSystem _whitelistSystem = default!;
 
         public override void Initialize()
         {
@@ -899,6 +899,32 @@ namespace Content.Shared.Containers.ItemSlots
                 return;
 
             slot.Locked = locked;
+            Dirty(uid, itemSlots);
+        }
+
+        /// <summary>
+        ///     Toggle whether a slot contributes a context-menu eject verb.
+        /// </summary>
+        public void SetDisableEject(EntityUid uid, string id, bool disabled, ItemSlotsComponent? itemSlots = null)
+        {
+            if (!Resolve(uid, ref itemSlots))
+                return;
+
+            if (!itemSlots.Slots.TryGetValue(id, out var slot))
+                return;
+
+            SetDisableEject(uid, slot, disabled, itemSlots);
+        }
+
+        /// <summary>
+        ///     Toggle whether a slot contributes a context-menu eject verb.
+        /// </summary>
+        public void SetDisableEject(EntityUid uid, ItemSlot slot, bool disabled, ItemSlotsComponent? itemSlots = null)
+        {
+            if (!Resolve(uid, ref itemSlots))
+                return;
+
+            slot.DisableEject = disabled;
             Dirty(uid, itemSlots);
         }
 
